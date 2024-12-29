@@ -150,38 +150,42 @@ int CaloValid::process_towers(PHCompositeNode* topNode)
   }
 
   //--------------------------- trigger and GL1-------------------------------//
-  bool scaledBits[64] = {false};
-  long long int raw[64] = {0};
-  long long int live[64] = {0};
-  // long long int scaled[64] = { 0 };
   Gl1Packet* gl1PacketInfo =
-      findNode::getClass<Gl1Packet>(topNode, "GL1Packet");
-  if (!gl1PacketInfo)
-  {
-    std::cout << PHWHERE << "GlobalQA::process_event: GL1Packet node is missing"
-              << std::endl;
-  }
-  uint64_t triggervec = 0;
+        findNode::getClass<Gl1Packet>(topNode, "GL1Packet");
+  uint64_t b_gl1_rawvec    = 0;  // e.g. "TriggerInput"  (raw triggers)
+  uint64_t b_gl1_livevec   = 0;  // e.g. "TriggerVector" (live triggers)
+  uint64_t b_gl1_scaledvec = 0;  // e.g. "ScaledVector"  (scaled triggers)
+    
+  long long int b_gl1_raw[64]    = {0}; // old "raw[i]"
+  long long int b_gl1_live[64]   = {0}; // old "live[i]"
+  long long int b_gl1_scaled[64] = {0}; // old "scaled[i]"
+
   if (gl1PacketInfo)
   {
-    triggervec = gl1PacketInfo->getScaledVector();
-    for (int i = 0; i < 64; i++)
+    // Get the 64-bit words
+    b_gl1_rawvec    = gl1PacketInfo->lValue(0, "TriggerInput");   // or your correct key
+    b_gl1_livevec   = gl1PacketInfo->lValue(0, "TriggerVector");  // or your correct key
+    b_gl1_scaledvec = gl1PacketInfo->lValue(0, "ScaledVector");   // or your correct key
+
+    // Store counters for each bit (if needed)
+    for (int ibit = 0; ibit < 64; ibit++)
     {
-      bool trig_decision = ((triggervec & 0x1U) == 0x1U);
-      scaledBits[i] = trig_decision;
-
-      raw[i] = gl1PacketInfo->lValue(i, 0);
-      live[i] = gl1PacketInfo->lValue(i, 1);
-      // scaled[i] = gl1PacketInfo->lValue(i, 2);
-
-      if (trig_decision)
-      {
-        h_triggerVec->Fill(i);
-      }
-      triggervec = (triggervec >> 1U) & 0xffffffffU;
+      b_gl1_raw[ibit]    = gl1PacketInfo->lValue(ibit, 0);  // previously raw[i]
+      b_gl1_live[ibit]   = gl1PacketInfo->lValue(ibit, 1);  // previously live[i]
+      b_gl1_scaled[ibit] = gl1PacketInfo->lValue(ibit, 2);  // previously scaled[i]
     }
-    triggervec = gl1PacketInfo->getScaledVector();
   }
+  else
+  {
+    // Just warn once
+    std::cout << PHWHERE << "GlobalQA::process_event: GL1Packet node missing" << std::endl;
+  }
+
+  // Now pull out the active bits for each (raw, live, scaled) using the inline helpers.
+  // Remember that _eventcounter++ was done in process_event(...).
+  std::vector<int> rawActiveBits    = extractTriggerBits(b_gl1_rawvec,    _eventcounter);
+  std::vector<int> liveActiveBits   = extractTriggerBits(b_gl1_livevec,   _eventcounter);
+  std::vector<int> scaledActiveBits = extractTriggerBits(b_gl1_scaledvec, _eventcounter);
 
   //---------------------------calibrated towers-------------------------------//
   {
@@ -573,8 +577,48 @@ int CaloValid::process_towers(PHCompositeNode* topNode)
           continue;
         }
 
-        TLorentzVector pi0 = photon1 + photon2;
-        h_InvMass->Fill(pi0.M());
+          TLorentzVector pi0 = photon1 + photon2;
+          float pi0Mass = pi0.M();
+
+          // ---------------------------------------------------------
+          // STEP A: GET LEADING TOWER COORDS FROM CLUSTER
+          // ---------------------------------------------------------
+          unsigned int lt_eta = recoCluster->get_lead_tower().first;   // Tower eta index
+          unsigned int lt_phi = recoCluster->get_lead_tower().second;  // Tower phi index
+
+          // map them to "sector" and "ib_board"
+          int sectorVal = custom_sector_mapping(lt_eta, lt_phi);
+          int ibVal     = custom_ib_board(lt_eta, lt_phi);
+
+          // Build a single integer for the y-axis of your TH3: we assume sector in [0..63], ib in [0..5]
+          int sectorIB_index = -1;
+          if (sectorVal >= 0 && ibVal >= 0)
+          {
+            sectorIB_index = sectorVal * 6 + ibVal; // range: 0..(64*6 -1)= 383
+          }
+          else
+          {
+            // optionally skip or do something if out-of-range
+            continue; // or sectorIB_index = -1
+          }
+
+          // ---------------------------------------------------------
+          // STEP B: FILL FOR EACH SCALED BIT THAT MATCHES TRIGGERINDICES
+          // ---------------------------------------------------------
+          for (int bit : scaledActiveBits)
+          {
+            // Only fill if bit is in our trigOfInterest
+            if (std::find(triggerIndices.begin(), triggerIndices.end(), bit) == triggerIndices.end())
+              continue;
+
+            // fill the TH3: (triggerBit, sectorIB_index, pi0Mass)
+            h_pi0_trigIB_mass->Fill((double) bit,
+                                    (double) sectorIB_index,
+                                    (double) pi0Mass);
+          }
+
+          // existing TH1 fill for total inv-mass
+          h_InvMass->Fill(pi0Mass);
       }
     }
   }
@@ -1029,6 +1073,23 @@ void CaloValid::createHistos()
     pr_livetime[i] = new TProfile(
         boost::str(boost::format("pr_CaloValid_livetime_trig%d") % i).c_str(),
         "", 100000, 0, 100000, 0, 10);
+      
+    // ------------------------------------------------------------------------
+    // ADD THIS NEW TH3F FOR (triggerBit, IB index, pi0 mass):
+    //    x-axis: triggerBit ∈ [0..63]
+    //    y-axis: iIB_global ∈ [0..383] (iIB_eta * 32 + iIB_phi)
+    //    z-axis: mass in [0..1.2]
+    // ------------------------------------------------------------------------
+    h_pi0_trigIB_mass = new TH3F(
+    "h_pi0_trigIB_mass",
+    ";Trigger Bit; iIB (eta*32 + phi); #pi^{0} Mass (GeV/c^{2})",
+    64, -0.5, 63.5,    // bins for triggers
+    384, -0.5, 383.5,  // bins for iIB_global
+    120, 0.0, 1.2      // bins for pi0 mass
+    );
+    h_pi0_trigIB_mass->SetDirectory(nullptr);
+    hm->registerHisto(h_pi0_trigIB_mass);
+
 
     hm->registerHisto(h_edist[i]);
     hm->registerHisto(h_ldClus_trig[i]);
