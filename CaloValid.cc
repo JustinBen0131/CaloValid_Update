@@ -26,6 +26,7 @@
 
 #include <TH1.h>
 #include <TH2.h>
+#include <TH3F.h>
 #include <TLorentzVector.h>
 #include <TProfile.h>
 #include <TProfile2D.h>
@@ -46,8 +47,8 @@
 CaloValid::CaloValid(const std::string& name)
   : SubsysReco(name)
 {
+  std::cout << "CaloValid constructor called for SubsysReco name = " << name << std::endl;
 }
-
 CaloValid::~CaloValid()
 {
   for (int i = 0; i < 128 * 192; i++)
@@ -64,29 +65,37 @@ CaloValid::~CaloValid()
   }
 }
 
-int CaloValid::Init(PHCompositeNode* /*unused*/)
+int CaloValid::Init(PHCompositeNode* topNode)
 {
+  std::cout << "CaloValid::Init() - topNode: " << topNode << std::endl;
+
   if (m_debug)
   {
-    std::cout << "In CaloValid::Init" << std::endl;
+    std::cout << "CaloValid is in DEBUG mode\n";
   }
-
+  std::cout << "CaloValid::Init() - now calling createHistos()\n";
   createHistos();
 
-  if (m_debug)
-  {
-    std::cout << "Leaving CaloValid::Init" << std::endl;
-  }
+  // Create the TriggerAnalyzer
+  std::cout << "CaloValid::Init() - creating TriggerAnalyzer...\n";
+  trigAna = new TriggerAnalyzer();
+
+  std::cout << "CaloValid::Init() - done.\n";
   return Fun4AllReturnCodes::EVENT_OK;
 }
 
 int CaloValid::process_event(PHCompositeNode* topNode)
 {
   _eventcounter++;
-  //  std::cout << "In process_event" << std::endl;
-  process_towers(topNode);
+  std::cout << "CaloValid::process_event() - event # " << _eventcounter << std::endl;
+  // hand off to process_towers
+  int retval = process_towers(topNode);
 
-  return Fun4AllReturnCodes::EVENT_OK;
+  // optionally print the return value
+  std::cout << "CaloValid::process_event() returning " << retval << std::endl;
+
+
+  return retval;
 }
 
 int CaloValid::process_towers(PHCompositeNode* topNode)
@@ -150,42 +159,67 @@ int CaloValid::process_towers(PHCompositeNode* topNode)
   }
 
   //--------------------------- trigger and GL1-------------------------------//
-  Gl1Packet* gl1PacketInfo =
-        findNode::getClass<Gl1Packet>(topNode, "GL1Packet");
-  uint64_t b_gl1_rawvec    = 0;  // e.g. "TriggerInput"  (raw triggers)
-  uint64_t b_gl1_livevec   = 0;  // e.g. "TriggerVector" (live triggers)
-  uint64_t b_gl1_scaledvec = 0;  // e.g. "ScaledVector"  (scaled triggers)
-    
-  long long int b_gl1_raw[64]    = {0}; // old "raw[i]"
-  long long int b_gl1_live[64]   = {0}; // old "live[i]"
-  long long int b_gl1_scaled[64] = {0}; // old "scaled[i]"
-
-  if (gl1PacketInfo)
-  {
-    // Get the 64-bit words
-    b_gl1_rawvec    = gl1PacketInfo->lValue(0, "TriggerInput");   // or your correct key
-    b_gl1_livevec   = gl1PacketInfo->lValue(0, "TriggerVector");  // or your correct key
-    b_gl1_scaledvec = gl1PacketInfo->lValue(0, "ScaledVector");   // or your correct key
-
-    // Store counters for each bit (if needed)
-    for (int ibit = 0; ibit < 64; ibit++)
+    // Print a marker before decoding triggers
+    std::cout << "CaloValid::process_towers() - about to decode triggers with TriggerAnalyzer...\n";
+    if (trigAna)
     {
-      b_gl1_raw[ibit]    = gl1PacketInfo->lValue(ibit, 0);  // previously raw[i]
-      b_gl1_live[ibit]   = gl1PacketInfo->lValue(ibit, 1);  // previously live[i]
-      b_gl1_scaled[ibit] = gl1PacketInfo->lValue(ibit, 2);  // previously scaled[i]
+      trigAna->decodeTriggers(topNode);
+      std::cout << "CaloValid::process_towers() - decodeTriggers done.\n";
     }
-  }
-  else
-  {
-    // Just warn once
-    std::cout << PHWHERE << "GlobalQA::process_event: GL1Packet node missing" << std::endl;
-  }
+    else
+    {
+      std::cout << "[ERROR] No TriggerAnalyzer pointer!\n";
+      return Fun4AllReturnCodes::ABORTEVENT;
+    }
 
-  // Now pull out the active bits for each (raw, live, scaled) using the inline helpers.
-  // Remember that _eventcounter++ was done in process_event(...).
-  std::vector<int> rawActiveBits    = extractTriggerBits(b_gl1_rawvec,    _eventcounter);
-  std::vector<int> liveActiveBits   = extractTriggerBits(b_gl1_livevec,   _eventcounter);
-  std::vector<int> scaledActiveBits = extractTriggerBits(b_gl1_scaledvec, _eventcounter);
+    // Build a vector of fired bits among your triggersOfInterest
+    std::vector<int> scaledActiveBits;
+    scaledActiveBits.reserve(triggerIndices.size());  // typically ~9 in your example
+    for (int bit : triggerIndices)
+    {
+      // Instead of your old 'extractTriggerBits', simply ask:
+      if (trigAna->didTriggerFire(bit))  // i.e. scaled trigger vector
+      {
+        scaledActiveBits.push_back(bit);
+        if (m_debug) {
+          std::cout << "[DEBUG] Trigger bit " << bit << " fired.\n";
+        }
+      }
+    }
+    
+    bool scaledBits[64] = {false};
+    long long int raw[64] = {0};
+    long long int live[64] = {0};
+    // long long int scaled[64] = { 0 };
+    Gl1Packet* gl1PacketInfo =
+        findNode::getClass<Gl1Packet>(topNode, "GL1Packet");
+    if (!gl1PacketInfo)
+    {
+      std::cout << PHWHERE << "GlobalQA::process_event: GL1Packet node is missing"
+                << std::endl;
+    }
+    uint64_t triggervec = 0;
+    if (gl1PacketInfo)
+    {
+      triggervec = gl1PacketInfo->getScaledVector();
+      for (int i = 0; i < 64; i++)
+      {
+        bool trig_decision = ((triggervec & 0x1U) == 0x1U);
+        scaledBits[i] = trig_decision;
+
+        raw[i] = gl1PacketInfo->lValue(i, 0);
+        live[i] = gl1PacketInfo->lValue(i, 1);
+        // scaled[i] = gl1PacketInfo->lValue(i, 2);
+
+        if (trig_decision)
+        {
+          h_triggerVec->Fill(i);
+        }
+        triggervec = (triggervec >> 1U) & 0xffffffffU;
+      }
+      triggervec = gl1PacketInfo->getScaledVector();
+    }
+
 
   //---------------------------calibrated towers-------------------------------//
   {
@@ -502,81 +536,71 @@ int CaloValid::process_towers(PHCompositeNode* topNode)
     gSystem->Exit(1);
   }
 
-  // cuts
-  float emcMinClusE1 = 1.3;  // 0.5;
-  float emcMinClusE2 = 0.7;  // 0.5;
-  float emcMaxClusE = 100;
-  float maxAlpha = 0.6;
+    // Some cut definitions
+    float emcMinClusE1 = 1.3;
+    float emcMinClusE2 = 0.7;
+    float emcMaxClusE  = 100;
+    float maxAlpha     = 0.6;
 
-  if (totalcemc < 0.2 * emcaldownscale)
-  {
-    RawClusterContainer::ConstRange clusterEnd = clusterContainer->getClusters();
-    RawClusterContainer::ConstIterator clusterIter;
-    RawClusterContainer::ConstIterator clusterIter2;
-
-    for (clusterIter = clusterEnd.first; clusterIter != clusterEnd.second; clusterIter++)
+    // Example condition on totalcemc
+    if (totalcemc < 0.2 * emcaldownscale)
     {
-      RawCluster* recoCluster = clusterIter->second;
+      RawClusterContainer::ConstRange clusterEnd = clusterContainer->getClusters();
+      RawClusterContainer::ConstIterator clusterIter;
+      RawClusterContainer::ConstIterator clusterIter2;
 
-      CLHEP::Hep3Vector vertex(0, 0, 0);
-      CLHEP::Hep3Vector E_vec_cluster = RawClusterUtility::GetECoreVec(*recoCluster, vertex);
-
-      float clusE = E_vec_cluster.mag();
-      float clus_eta = E_vec_cluster.pseudoRapidity();
-      float clus_phi = E_vec_cluster.phi();
-      float clus_pt = E_vec_cluster.perp();
-      float clus_chisq = recoCluster->get_chi2();
-
-      h_clusE->Fill(clusE);
-
-      if (clusE < emcMinClusE1 || clusE > emcMaxClusE)
+      for (clusterIter = clusterEnd.first; clusterIter != clusterEnd.second; ++clusterIter)
       {
-        continue;
-      }
-      if (clus_chisq > 4)
-      {
-        continue;
-      }
+        RawCluster* recoCluster = clusterIter->second;
+        
+        // Get cluster energy, etc.
+        CLHEP::Hep3Vector vertex(0, 0, 0);
+        CLHEP::Hep3Vector E_vec_cluster = RawClusterUtility::GetECoreVec(*recoCluster, vertex);
 
-      h_etaphi_clus->Fill(clus_eta, clus_phi);
+        float clusE      = E_vec_cluster.mag();
+        float clus_eta   = E_vec_cluster.pseudoRapidity();
+        float clus_phi   = E_vec_cluster.phi();
+        float clus_pt    = E_vec_cluster.perp();
+        float clus_chisq = recoCluster->get_chi2();
 
-      TLorentzVector photon1;
-      photon1.SetPtEtaPhiE(clus_pt, clus_eta, clus_phi, clusE);
+        // Basic cluster cuts
+        if (clusE < emcMinClusE1 || clusE > emcMaxClusE)    continue;
+        if (clus_chisq > 4)                                continue;
 
-      for (clusterIter2 = clusterEnd.first; clusterIter2 != clusterEnd.second; clusterIter2++)
-      {
-        if (clusterIter == clusterIter2)
+        // Fill some cluster QA histos
+        h_clusE->Fill(clusE);
+        h_etaphi_clus->Fill(clus_eta, clus_phi);
+
+        // Form the first photon
+        TLorentzVector photon1;
+        photon1.SetPtEtaPhiE(clus_pt, clus_eta, clus_phi, clusE);
+
+        // Loop over second cluster
+        for (clusterIter2 = clusterEnd.first; clusterIter2 != clusterEnd.second; ++clusterIter2)
         {
-          continue;
-        }
-        RawCluster* recoCluster2 = clusterIter2->second;
+          // Avoid same cluster
+          if (clusterIter2 == clusterIter) continue;
 
-        CLHEP::Hep3Vector vertex2(0, 0, 0);
-        CLHEP::Hep3Vector E_vec_cluster2 = RawClusterUtility::GetECoreVec(*recoCluster2, vertex2);
+          RawCluster* recoCluster2 = clusterIter2->second;
+          CLHEP::Hep3Vector vertex2(0, 0, 0);
+          CLHEP::Hep3Vector E_vec_cluster2 = RawClusterUtility::GetECoreVec(*recoCluster2, vertex2);
 
-        float clus2E = E_vec_cluster2.mag();
-        float clus2_eta = E_vec_cluster2.pseudoRapidity();
-        float clus2_phi = E_vec_cluster2.phi();
-        float clus2_pt = E_vec_cluster2.perp();
-        float clus2_chisq = recoCluster2->get_chi2();
+          float clus2E      = E_vec_cluster2.mag();
+          float clus2_chisq = recoCluster2->get_chi2();
+          if (clus2E < emcMinClusE2 || clus2E > emcMaxClusE)  continue;
+          if (clus2_chisq > 4)                                continue;
 
-        if (clus2E < emcMinClusE2 || clus2E > emcMaxClusE)
-        {
-          continue;
-        }
-        if (clus2_chisq > 4)
-        {
-          continue;
-        }
+          // Form second photon
+          TLorentzVector photon2;
+          photon2.SetPtEtaPhiE(E_vec_cluster2.perp(),
+                               E_vec_cluster2.pseudoRapidity(),
+                               E_vec_cluster2.phi(),
+                               clus2E);
 
-        TLorentzVector photon2;
-        photon2.SetPtEtaPhiE(clus2_pt, clus2_eta, clus2_phi, clus2E);
+          // alpha cut
+          if (std::fabs(clusE - clus2E) / (clusE + clus2E) > maxAlpha) continue;
 
-        if (sqrt(pow(clusE - clus2E, 2)) / (clusE + clus2E) > maxAlpha)
-        {
-          continue;
-        }
-
+          // Combine into pi0 candidate
           TLorentzVector pi0 = photon1 + photon2;
           float pi0Mass = pi0.M();
 
@@ -586,42 +610,37 @@ int CaloValid::process_towers(PHCompositeNode* topNode)
           unsigned int lt_eta = recoCluster->get_lead_tower().first;   // Tower eta index
           unsigned int lt_phi = recoCluster->get_lead_tower().second;  // Tower phi index
 
-          // map them to "sector" and "ib_board"
-          int sectorVal = custom_sector_mapping(lt_eta, lt_phi);
-          int ibVal     = custom_ib_board(lt_eta, lt_phi);
+          // Group them by 8x8 blocks for "IB" indexing:
+          int ld_ib_eta = lt_eta / 8;  // integer division
+          int ld_ib_phi = lt_phi / 8;  // integer division
 
-          // Build a single integer for the y-axis of your TH3: we assume sector in [0..63], ib in [0..5]
-          int sectorIB_index = -1;
-          if (sectorVal >= 0 && ibVal >= 0)
-          {
-            sectorIB_index = sectorVal * 6 + ibVal; // range: 0..(64*6 -1)= 383
-          }
-          else
-          {
-            // optionally skip or do something if out-of-range
-            continue; // or sectorIB_index = -1
-          }
+          // There are 12 IB boards in phi:
+          int IB_num = ld_ib_eta * 12 + ld_ib_phi;
 
           // ---------------------------------------------------------
           // STEP B: FILL FOR EACH SCALED BIT THAT MATCHES TRIGGERINDICES
           // ---------------------------------------------------------
           for (int bit : scaledActiveBits)
           {
-            // Only fill if bit is in our trigOfInterest
-            if (std::find(triggerIndices.begin(), triggerIndices.end(), bit) == triggerIndices.end())
+            // Only fill if bit is in our list of triggers
+            if (std::find(triggerIndices.begin(), triggerIndices.end(), bit)
+                == triggerIndices.end())
+            {
               continue;
+            }
 
-            // fill the TH3: (triggerBit, sectorIB_index, pi0Mass)
+            // fill TH3: (triggerBit, IB_num, pi0Mass)
             h_pi0_trigIB_mass->Fill((double) bit,
-                                    (double) sectorIB_index,
+                                    (double) IB_num,
                                     (double) pi0Mass);
           }
 
           // existing TH1 fill for total inv-mass
           h_InvMass->Fill(pi0Mass);
-      }
-    }
-  }
+        }
+      } // end cluster loop
+    } // end if (totalcemc < 0.2 * emcaldownscale)
+
 
   //----------------- Trigger / alignment ----------------------------//
   float leading_cluster_ecore = 0;
@@ -774,15 +793,35 @@ void CaloValid::MirrorHistogram(TH1* h)
   }
 }
 
+/*
+ If ybins_in = 1000, then new Double_t[1001] is allocated, but the loop goes up to 1001 inclusive, i.e. it tries to write ybins[1001], which is one beyond the end of the array.
+ This stomps on unrelated heap memory and leads to the “malloc(): memory corruption” crash when the next histogram tries to allocate.
+ */
+//TH2* CaloValid::LogYHist2D(const std::string& name, const std::string& title, int xbins_in, double xmin, double xmax, int ybins_in, double ymin, double ymax)
+//{
+//  Double_t logymin = std::log10(ymin);
+//  Double_t logymax = std::log10(ymax);
+//  Double_t binwidth = (logymax - logymin) / ybins_in;
+//  Double_t *ybins = new Double_t[ybins_in + 1];
+//
+//  for (Int_t i = 0; i <= ybins_in + 1; i++)
+//  {
+//    ybins[i] = pow(10, logymin + i * binwidth);
+//  }
+//
+//  TH2F* h = new TH2F(name.c_str(), title.c_str(), xbins_in, xmin, xmax, ybins_in, ybins);
+//  delete [] ybins;
+//  return h;
+//}
 TH2* CaloValid::LogYHist2D(const std::string& name, const std::string& title, int xbins_in, double xmin, double xmax, int ybins_in, double ymin, double ymax)
 {
   Double_t logymin = std::log10(ymin);
   Double_t logymax = std::log10(ymax);
   Double_t binwidth = (logymax - logymin) / ybins_in;
-  Double_t *ybins = new Double_t[ybins_in + 1];
 
-  for (Int_t i = 0; i <= ybins_in + 1; i++)
-  {
+    Double_t *ybins = new Double_t[ybins_in + 2]; // allocate 1 extra
+    for (int i = 0; i <= ybins_in + 1; i++)
+    {
     ybins[i] = pow(10, logymin + i * binwidth);
   }
 
@@ -794,45 +833,126 @@ std::string CaloValid::getHistoPrefix() const { return std::string("h_") + Name(
 
 void CaloValid::createHistos()
 {
-  auto hm = QAHistManagerDef::getHistoManager();
-  assert(hm);
+    std::cout << "[DEBUG] Entering CaloValid::createHistos()" << std::endl;
 
-  // create and register your histos (all types) here
-  h_emcal_mbd_correlation = new TH2F(boost::str(boost::format("%semcal_mbd_correlation") % getHistoPrefix()).c_str(), ";emcal;mbd", 100, 0, 1, 100, 0, 1);
-  h_emcal_mbd_correlation->SetDirectory(nullptr);
-  hm->registerHisto(h_emcal_mbd_correlation);
+    auto hm = QAHistManagerDef::getHistoManager();
+    if (!hm)
+    {
+      std::cerr << "[ERROR] QAHistManagerDef::getHistoManager() returned nullptr! Cannot proceed.\n";
+      return;
+    }
+    std::cout << "[DEBUG] Successfully obtained QAHistManagerDef histoManager.\n";
 
-  h_mbd_hits = new TH1F(boost::str(boost::format("%smbd_hits") % getHistoPrefix()).c_str(), "mb hits", 100, 0, 100);
-  h_mbd_hits->SetDirectory(nullptr);
-  hm->registerHisto(h_mbd_hits);
+    std::string prefix = getHistoPrefix();
+    std::cout << "[DEBUG] Histo prefix is: \"" << prefix << "\"\n";
 
-  h_ohcal_mbd_correlation = new TH2F(boost::str(boost::format("%sohcal_mbd_correlation") % getHistoPrefix()).c_str(), ";ohcal;mbd", 100, 0, 1, 100, 0, 1);
-  h_ohcal_mbd_correlation->SetDirectory(nullptr);
-  hm->registerHisto(h_ohcal_mbd_correlation);
+    // -------------------------------
+    // 1) TH2F: h_emcal_mbd_correlation
+    // -------------------------------
+    std::cout << "[DEBUG] Creating h_emcal_mbd_correlation TH2F..." << std::endl;
+    h_emcal_mbd_correlation = new TH2F(
+        (boost::format("%semcal_mbd_correlation") % prefix).str().c_str(),
+        ";emcal;mbd",
+        100, 0, 1, 100, 0, 1);
+    h_emcal_mbd_correlation->SetDirectory(nullptr);
+    hm->registerHisto(h_emcal_mbd_correlation);
+    std::cout << "[DEBUG] Finished registering h_emcal_mbd_correlation.\n";
 
-  h_ihcal_mbd_correlation = new TH2F(boost::str(boost::format("%sihcal_mbd_correlation") % getHistoPrefix()).c_str(), ";ihcal;mbd", 100, 0, 1, 100, 0, 1);
-  h_ihcal_mbd_correlation->SetDirectory(nullptr);
-  hm->registerHisto(h_ihcal_mbd_correlation);
+    // -------------------------------
+    // 2) TH1F: h_mbd_hits
+    // -------------------------------
+    std::cout << "[DEBUG] Creating h_mbd_hits TH1F..." << std::endl;
+    h_mbd_hits = new TH1F(
+        (boost::format("%smbd_hits") % prefix).str().c_str(),
+        "mb hits",
+        100, 0, 100);
+    h_mbd_hits->SetDirectory(nullptr);
+    hm->registerHisto(h_mbd_hits);
+    std::cout << "[DEBUG] Finished registering h_mbd_hits.\n";
 
-  h_emcal_hcal_correlation = new TH2F(boost::str(boost::format("%semcal_hcal_correlation") % getHistoPrefix()).c_str(), ";emcal;hcal", 100, 0, 1, 100, 0, 1);
-  h_emcal_hcal_correlation->SetDirectory(nullptr);
-  hm->registerHisto(h_emcal_hcal_correlation);
+    // -------------------------------
+    // 3) TH2F: h_ohcal_mbd_correlation
+    // -------------------------------
+    std::cout << "[DEBUG] Creating h_ohcal_mbd_correlation TH2F..." << std::endl;
+    h_ohcal_mbd_correlation = new TH2F(
+        (boost::format("%sohcal_mbd_correlation") % prefix).str().c_str(),
+        ";ohcal;mbd",
+        100, 0, 1, 100, 0, 1);
+    h_ohcal_mbd_correlation->SetDirectory(nullptr);
+    hm->registerHisto(h_ohcal_mbd_correlation);
+    std::cout << "[DEBUG] Finished registering h_ohcal_mbd_correlation.\n";
 
-  h_cemc_etaphi = new TH2F(boost::str(boost::format("%scemc_etaphi") % getHistoPrefix()).c_str(), ";eta;phi", 96, 0, 96, 256, 0, 256);
-  h_cemc_etaphi->SetDirectory(nullptr);
-  hm->registerHisto(h_cemc_etaphi);
+    // -------------------------------
+    // 4) TH2F: h_ihcal_mbd_correlation
+    // -------------------------------
+    std::cout << "[DEBUG] Creating h_ihcal_mbd_correlation TH2F..." << std::endl;
+    h_ihcal_mbd_correlation = new TH2F(
+        (boost::format("%sihcal_mbd_correlation") % prefix).str().c_str(),
+        ";ihcal;mbd",
+        100, 0, 1, 100, 0, 1);
+    h_ihcal_mbd_correlation->SetDirectory(nullptr);
+    hm->registerHisto(h_ihcal_mbd_correlation);
+    std::cout << "[DEBUG] Finished registering h_ihcal_mbd_correlation.\n";
 
-  h_ihcal_etaphi = new TH2F(boost::str(boost::format("%sihcal_etaphi") % getHistoPrefix()).c_str(), ";eta;phi", 24, 0, 24, 64, 0, 64);
-  h_ihcal_etaphi->SetDirectory(nullptr);
-  hm->registerHisto(h_ihcal_etaphi);
+    // -------------------------------
+    // 5) TH2F: h_emcal_hcal_correlation
+    // -------------------------------
+    std::cout << "[DEBUG] Creating h_emcal_hcal_correlation TH2F..." << std::endl;
+    h_emcal_hcal_correlation = new TH2F(
+        (boost::format("%semcal_hcal_correlation") % prefix).str().c_str(),
+        ";emcal;hcal",
+        100, 0, 1, 100, 0, 1);
+    h_emcal_hcal_correlation->SetDirectory(nullptr);
+    hm->registerHisto(h_emcal_hcal_correlation);
+    std::cout << "[DEBUG] Finished registering h_emcal_hcal_correlation.\n";
 
-  h_ohcal_etaphi = new TH2F(boost::str(boost::format("%sohcal_etaphi") % getHistoPrefix()).c_str(), ";eta;phi", 24, 0, 24, 64, 0, 64);
-  h_ohcal_etaphi->SetDirectory(nullptr);
-  hm->registerHisto(h_ohcal_etaphi);
+    // -------------------------------
+    // 6) TH2F: h_cemc_etaphi
+    // -------------------------------
+    std::cout << "[DEBUG] Creating h_cemc_etaphi TH2F..." << std::endl;
+    h_cemc_etaphi = new TH2F(
+        (boost::format("%scemc_etaphi") % prefix).str().c_str(),
+        ";eta;phi",
+        96, 0, 96, 256, 0, 256);
+    h_cemc_etaphi->SetDirectory(nullptr);
+    hm->registerHisto(h_cemc_etaphi);
+    std::cout << "[DEBUG] Finished registering h_cemc_etaphi.\n";
 
-  h_cemc_etaphi_wQA = new TH2F(boost::str(boost::format("%scemc_etaphi_wQA") % getHistoPrefix()).c_str(), ";eta;phi", 96, 0, 96, 256, 0, 256);
-  h_cemc_etaphi_wQA->SetDirectory(nullptr);
-  hm->registerHisto(h_cemc_etaphi_wQA);
+    // -----------------------------------------------------------
+    // 7) TH2F: h_ihcal_etaphi
+    // -----------------------------------------------------------
+    std::cout << "[DEBUG] Creating h_ihcal_etaphi TH2F..." << std::endl;
+    h_ihcal_etaphi = new TH2F(
+        (boost::format("%sihcal_etaphi") % prefix).str().c_str(),
+        ";eta;phi",
+        24, 0, 24, 64, 0, 64);
+    h_ihcal_etaphi->SetDirectory(nullptr);
+    hm->registerHisto(h_ihcal_etaphi);
+    std::cout << "[DEBUG] Finished registering h_ihcal_etaphi.\n";
+
+    // -----------------------------------------------------------
+    // 8) TH2F: h_ohcal_etaphi
+    // -----------------------------------------------------------
+    std::cout << "[DEBUG] Creating h_ohcal_etaphi TH2F..." << std::endl;
+    h_ohcal_etaphi = new TH2F(
+        (boost::format("%sohcal_etaphi") % prefix).str().c_str(),
+        ";eta;phi",
+        24, 0, 24, 64, 0, 64);
+    h_ohcal_etaphi->SetDirectory(nullptr);
+    hm->registerHisto(h_ohcal_etaphi);
+    std::cout << "[DEBUG] Finished registering h_ohcal_etaphi.\n";
+
+    // -----------------------------------------------------------
+    // 9) TH2F: h_cemc_etaphi_wQA
+    // -----------------------------------------------------------
+    std::cout << "[DEBUG] Creating h_cemc_etaphi_wQA TH2F..." << std::endl;
+    h_cemc_etaphi_wQA = new TH2F(
+        (boost::format("%scemc_etaphi_wQA") % prefix).str().c_str(),
+        ";eta;phi",
+        96, 0, 96, 256, 0, 256);
+    h_cemc_etaphi_wQA->SetDirectory(nullptr);
+    hm->registerHisto(h_cemc_etaphi_wQA);
+    std::cout << "[DEBUG] Finished registering h_cemc_etaphi_wQA.\n";
 
   h_ihcal_etaphi_wQA = new TH2F(boost::str(boost::format("%sihcal_etaphi_wQA") % getHistoPrefix()).c_str(), ";eta;phi", 24, 0, 24, 64, 0, 64);
   h_ihcal_etaphi_wQA->SetDirectory(nullptr);
@@ -1004,99 +1124,132 @@ void CaloValid::createHistos()
   h_triggerVec->SetDirectory(nullptr);
   hm->registerHisto(h_triggerVec);
 
-  //---------EMCal--------//
-  {
-    int size = 128 * 192;
-    for (int channel = 0; channel < size; channel++)
+    std::cout << "[DEBUG] Creating EMCal channel histos (128*192)..." << std::endl;
     {
-      std::string hname = (boost::format("h_cemc_channel_pedestal_%d") % channel).str();
-      h_cemc_channel_pedestal[channel] = new TH1F(hname.c_str(), hname.c_str(), 2000, -0.5, 2000.5);
-      h_cemc_channel_pedestal[channel]->SetDirectory(nullptr);
+      int size = 128 * 192;
+      for (int channel = 0; channel < size; channel++)
+      {
+        // Optionally print every 10k channels
+        if (channel % 5000 == 0)
+        {
+          std::cout << "[DEBUG] EMCal channel " << channel
+                    << " / " << size << std::endl;
+        }
 
-      std::string hnameE = (boost::format("h_cemc_channel_energy_%d") % channel).str();
-      h_cemc_channel_energy[channel] = new TH1F(hnameE.c_str(), hnameE.c_str(), 1000, -50, 50);
-      h_cemc_channel_energy[channel]->SetDirectory(nullptr);
+        std::string hname = (boost::format("h_cemc_channel_pedestal_%d") % channel).str();
+        h_cemc_channel_pedestal[channel] = new TH1F(
+            hname.c_str(), hname.c_str(), 2000, -0.5, 2000.5);
+        h_cemc_channel_pedestal[channel]->SetDirectory(nullptr);
+
+        std::string hnameE = (boost::format("h_cemc_channel_energy_%d") % channel).str();
+        h_cemc_channel_energy[channel] = new TH1F(
+            hnameE.c_str(), hnameE.c_str(), 1000, -50, 50);
+        h_cemc_channel_energy[channel]->SetDirectory(nullptr);
+      }
+      std::cout << "[DEBUG] Finished EMCal channel loop.\n";
     }
-  }
-  //--------OHCal--------//
-  {
-    int size = 32 * 48;
-    for (int channel = 0; channel < size; channel++)
+
+    // Then the same for OHCal channels
+    std::cout << "[DEBUG] Creating OHCal channel histos (32*48)..." << std::endl;
     {
-      std::string hname = (boost::format("h_ohcal_channel_pedestal_%d") % channel).str();
-      h_ohcal_channel_pedestal[channel] = new TH1F(hname.c_str(), hname.c_str(), 2000, -0.5, 2000.5);
-      h_ohcal_channel_pedestal[channel]->SetDirectory(nullptr);
+      int size = 32 * 48;
+      for (int channel = 0; channel < size; channel++)
+      {
+        if (channel % 500 == 0)
+        {
+          std::cout << "[DEBUG] OHCal channel " << channel
+                    << " / " << size << std::endl;
+        }
 
-      std::string hnameE = (boost::format("h_ohcal_channel_energy_%d") % channel).str();
-      h_ohcal_channel_energy[channel] = new TH1F(hnameE.c_str(), hnameE.c_str(), 1000, -50, 50);
-      h_ohcal_channel_energy[channel]->SetDirectory(nullptr);
+        std::string hname = (boost::format("h_ohcal_channel_pedestal_%d") % channel).str();
+        h_ohcal_channel_pedestal[channel] = new TH1F(
+            hname.c_str(), hname.c_str(), 2000, -0.5, 2000.5);
+        h_ohcal_channel_pedestal[channel]->SetDirectory(nullptr);
+
+        std::string hnameE = (boost::format("h_ohcal_channel_energy_%d") % channel).str();
+        h_ohcal_channel_energy[channel] = new TH1F(
+            hnameE.c_str(), hnameE.c_str(), 1000, -50, 50);
+        h_ohcal_channel_energy[channel]->SetDirectory(nullptr);
+      }
+      std::cout << "[DEBUG] Finished OHCal channel loop.\n";
     }
-  }
-  //--------IHCal-------//
-  {
-    int size = 32 * 48;
-    for (int channel = 0; channel < size; channel++)
+
+    // Then IHCal channels
+    std::cout << "[DEBUG] Creating IHCal channel histos (32*48)..." << std::endl;
     {
-      std::string hname = (boost::format("h_ihcal_channel_pedestal_%d") % channel).str();
-      h_ihcal_channel_pedestal[channel] = new TH1F(hname.c_str(), hname.c_str(), 2000, -0.5, 2000.5);
-      h_ihcal_channel_pedestal[channel]->SetDirectory(nullptr);
+      int size = 32 * 48;
+      for (int channel = 0; channel < size; channel++)
+      {
+        if (channel % 500 == 0)
+        {
+          std::cout << "[DEBUG] IHCal channel " << channel
+                    << " / " << size << std::endl;
+        }
 
-      std::string hnameE = (boost::format("h_ihcal_channel_energy_%d") % channel).str();
-      h_ihcal_channel_energy[channel] = new TH1F(hnameE.c_str(), hnameE.c_str(), 1000, -50, 50);
-      h_ihcal_channel_energy[channel]->SetDirectory(nullptr);
-    }
-  }
+        std::string hname = (boost::format("h_ihcal_channel_pedestal_%d") % channel).str();
+        h_ihcal_channel_pedestal[channel] = new TH1F(
+            hname.c_str(), hname.c_str(), 2000, -0.5, 2000.5);
+        h_ihcal_channel_pedestal[channel]->SetDirectory(nullptr);
 
-  // Trigger QA
-  h_triggerVec = new TH1F("h_CaloValid_triggerVec", "", 64, 0, 64);
-  pr_ldClus_trig =
-      new TProfile("pr_CaloValid_ldClus_trig", "", 64, 0, 64, 0, 10);
-  for (int i = 0; i < 64; i++)
-  {
-    if (!(std::find(trigOfInterest.begin(), trigOfInterest.end(), i) != trigOfInterest.end()))
-    {
-      continue;
+        std::string hnameE = (boost::format("h_ihcal_channel_energy_%d") % channel).str();
+        h_ihcal_channel_energy[channel] = new TH1F(
+            hnameE.c_str(), hnameE.c_str(), 1000, -50, 50);
+        h_ihcal_channel_energy[channel]->SetDirectory(nullptr);
+      }
+      std::cout << "[DEBUG] Finished IHCal channel loop.\n";
     }
-    h_edist[i] = new TH2F(
-        boost::str(boost::format("h_CaloValid_edist_trig%d") % i).c_str(), "",
-        64, -1.2, 1.2, 128, -3.1415, 3.1415);
-    h_ldClus_trig[i] = new TH1F(
-        boost::str(boost::format("h_CaloValid_ldClus_trig%d") % i).c_str(), "",
-        18, 1, 10);
-    pr_evtNum_ldClus_trig[i] = new TProfile(
-        boost::str(boost::format("pr_CaloValid_evtNum_ldClus_trig%d") % i)
-            .c_str(),
-        "", 100000, 0, 100000, 0, 10);
-    pr_rejection[i] = new TProfile(
-        boost::str(boost::format("pr_CaloValid_rejection_trig%d") % i).c_str(),
-        "", 100000, 0, 100000, 0, 50000);
-    pr_livetime[i] = new TProfile(
-        boost::str(boost::format("pr_CaloValid_livetime_trig%d") % i).c_str(),
-        "", 100000, 0, 100000, 0, 10);
-      
-    // ------------------------------------------------------------------------
-    // ADD THIS NEW TH3F FOR (triggerBit, IB index, pi0 mass):
-    //    x-axis: triggerBit ∈ [0..63]
-    //    y-axis: iIB_global ∈ [0..383] (iIB_eta * 32 + iIB_phi)
-    //    z-axis: mass in [0..1.2]
-    // ------------------------------------------------------------------------
+
+    // Create the h_pi0_trigIB_mass once
+    std::cout << "[DEBUG] Creating h_pi0_trigIB_mass TH3F (for pi0)..." << std::endl;
     h_pi0_trigIB_mass = new TH3F(
-    "h_pi0_trigIB_mass",
-    ";Trigger Bit; iIB (eta*32 + phi); #pi^{0} Mass (GeV/c^{2})",
-    64, -0.5, 63.5,    // bins for triggers
-    384, -0.5, 383.5,  // bins for iIB_global
-    120, 0.0, 1.2      // bins for pi0 mass
+        "h_pi0_trigIB_mass",
+        ";Trigger Bit; iIB (eta*32 + phi); #pi^{0} Mass (GeV/c^{2})",
+        64, -0.5, 63.5,    // triggers
+        384, -0.5, 383.5,  // IB index
+        120, 0.0, 1.2      // mass range
     );
     h_pi0_trigIB_mass->SetDirectory(nullptr);
+    std::cout << "[DEBUG] Attempting to register h_pi0_trigIB_mass..." << std::endl;
     hm->registerHisto(h_pi0_trigIB_mass);
+    std::cout << "[DEBUG] Finished registering h_pi0_trigIB_mass.\n";
 
 
-    hm->registerHisto(h_edist[i]);
-    hm->registerHisto(h_ldClus_trig[i]);
-    hm->registerHisto(pr_evtNum_ldClus_trig[i]);
-    hm->registerHisto(pr_rejection[i]);
-    hm->registerHisto(pr_livetime[i]);
-  }
-  hm->registerHisto(h_triggerVec);
-  hm->registerHisto(pr_ldClus_trig);
+    // Trigger QA
+    /*
+     commented out below line to fix memory issue due to previous initlaization with same name
+     */
+//    h_triggerVec = new TH1F("h_CaloValid_triggerVec", "", 64, 0, 64);
+    pr_ldClus_trig =
+        new TProfile("pr_CaloValid_ldClus_trig", "", 64, 0, 64, 0, 10);
+    for (int i = 0; i < 64; i++)
+    {
+      if (!(std::find(trigOfInterest.begin(), trigOfInterest.end(), i) != trigOfInterest.end()))
+      {
+        continue;
+      }
+      h_edist[i] = new TH2F(
+          boost::str(boost::format("h_CaloValid_edist_trig%d") % i).c_str(), "",
+          64, -1.2, 1.2, 128, -3.1415, 3.1415);
+      h_ldClus_trig[i] = new TH1F(
+          boost::str(boost::format("h_CaloValid_ldClus_trig%d") % i).c_str(), "",
+          18, 1, 10);
+      pr_evtNum_ldClus_trig[i] = new TProfile(
+          boost::str(boost::format("pr_CaloValid_evtNum_ldClus_trig%d") % i)
+              .c_str(),
+          "", 100000, 0, 100000, 0, 10);
+      pr_rejection[i] = new TProfile(
+          boost::str(boost::format("pr_CaloValid_rejection_trig%d") % i).c_str(),
+          "", 100000, 0, 100000, 0, 50000);
+      pr_livetime[i] = new TProfile(
+          boost::str(boost::format("pr_CaloValid_livetime_trig%d") % i).c_str(),
+          "", 100000, 0, 100000, 0, 10);
+
+      hm->registerHisto(h_edist[i]);
+      hm->registerHisto(h_ldClus_trig[i]);
+      hm->registerHisto(pr_evtNum_ldClus_trig[i]);
+      hm->registerHisto(pr_rejection[i]);
+      hm->registerHisto(pr_livetime[i]);
+    }
+    hm->registerHisto(h_triggerVec);
+    hm->registerHisto(pr_ldClus_trig);
 }
