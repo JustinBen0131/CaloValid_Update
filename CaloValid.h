@@ -7,6 +7,9 @@
 #include <vector>
 #include <iostream>  // for std::cout, std::endl
 #include <TH1F.h>    // for TH1F forward usage
+#include <calotrigger/TriggerAnalyzer.h>  // or the correct path in your setup
+#include <TH3F.h>
+
 
 // Forward declarations
 class PHCompositeNode;
@@ -56,95 +59,6 @@ class CaloValid : public SubsysReco
                   int xbins, double xmin, double xmax,
                   int ybins, double ymin, double ymax);
 
-  // -------------------------------------------------------------------
-  //   Inline helpers for extracting or checking trigger bits
-  // -------------------------------------------------------------------
-  inline std::vector<int> extractTriggerBits(uint64_t gl1_scaledvec, int entry)
-  {
-    std::vector<int> trig_bits;
-    std::bitset<64> bits(gl1_scaledvec);
-
-    if (m_debug)
-    {
-      std::cout << "[DEBUG] Processing entry " << entry
-                << " bits: " << bits.to_string() << std::endl;
-    }
-
-    for (unsigned int bit = 0; bit < 64; bit++)
-    {
-      if (((gl1_scaledvec >> bit) & 0x1U) == 0x1U)
-      {
-        trig_bits.push_back(bit);
-      }
-    }
-    return trig_bits;
-  }
-
-  inline bool checkTriggerCondition(const std::vector<int> &trig_bits, int inputBit)
-  {
-    for (const int &bit : trig_bits)
-    {
-      if (bit == inputBit)
-      {
-        if (m_debug)
-        {
-          std::cout << "[DEBUG] Trigger bit " << bit << " fired.\n";
-        }
-        return true;
-      }
-    }
-    if (m_debug)
-    {
-      std::cout << "[DEBUG] No relevant trigger condition met.\n";
-    }
-    return false;
-  }
-
-  // -------------------------------------------------------------------
-  //   Static mapping functions for sector + IB determination
-  // -------------------------------------------------------------------
-  static int custom_sector_mapping(unsigned int eta, unsigned int phi)
-  {
-    // If eta >= 48..96 => sector = (phi / 8) in [0..31]
-    // If eta < 48      => sector = 32 + (phi / 8) in [32..63]
-    // If sector < 0 => out-of-range => handle as needed
-    int sector = -1;
-    if (eta >= 48 && eta < 96)
-    {
-      sector = (phi / 8); // 0..31
-    }
-    else if (eta < 48)
-    {
-      sector = 32 + (phi / 8); // 32..63
-    }
-    return sector;
-  }
-
-  static int custom_ib_board(int eta, int phi)
-  {
-    // IB board determination (6 boards each region):
-    //   If eta >= 48..56 => ib_board=0
-    //   56..64 => 1, 64..72 => 2, 72..80 => 3, 80..88 => 4, 88..96 => 5
-    //   (lower region) 40..48 =>0, 32..40 =>1, 24..32 =>2, etc.
-    int ib_board;
-    if      (eta >= 48 && eta < 56) { ib_board = 0; }
-    else if (eta >= 56 && eta < 64) { ib_board = 1; }
-    else if (eta >= 64 && eta < 72) { ib_board = 2; }
-    else if (eta >= 72 && eta < 80) { ib_board = 3; }
-    else if (eta >= 80 && eta < 88) { ib_board = 4; }
-    else if (eta >= 88 && eta < 96) { ib_board = 5; }
-    else if (eta >= 40 && eta < 48) { ib_board = 0; }
-    else if (eta >= 32 && eta < 40) { ib_board = 1; }
-    else if (eta >= 24 && eta < 32) { ib_board = 2; }
-    else if (eta >= 16 && eta < 24) { ib_board = 3; }
-    else if (eta >= 8  && eta < 16) { ib_board = 4; }
-    else if (eta >= 0  && eta < 8)  { ib_board = 5; }
-    else
-    {
-      ib_board = -1;  // out-of-range
-    }
-    return ib_board;
-  }
 
  private:
   // internal method to set up histograms
@@ -153,6 +67,7 @@ class CaloValid : public SubsysReco
   void MirrorHistogram(TH1* histogram);
   // prefix used by QA hist manager
   std::string getHistoPrefix() const;
+  TriggerAnalyzer* trigAna{nullptr};
 
   // -------------------------------------------------------------------
   // Data members
